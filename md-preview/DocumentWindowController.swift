@@ -35,7 +35,7 @@ private extension Array where Element == NSToolbarItem.Identifier {
     }
 }
 
-final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSharingServicePickerToolbarItemDelegate, NSSearchFieldDelegate, NSMenuDelegate {
+final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSharingServicePickerToolbarItemDelegate, NSSearchFieldDelegate, NSMenuDelegate, NSMenuItemValidation {
 
     private enum NavigationIntent {
         case normal
@@ -732,11 +732,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(saveDocument(_:)) {
-            return isEditing
+        switch menuItem.action {
+        case #selector(saveDocument(_:)):
+            return isEditing || hasPendingEditorChanges
+        case #selector(saveDocumentAs(_:)):
+            return currentMarkdown != nil && !isEditorCommitInFlight
+        default:
+            syncSidebarMenuState()
+            return true
         }
-        syncSidebarMenuState()
-        return true
     }
 
     private func makeInspectorItem() -> NSToolbarItem {
@@ -1145,6 +1149,38 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         commitEdits(exitAfter: false)
     }
 
+    /// File > Save As (⇧⌘S): always picks a new destination, writes it, then
+    /// follows the new file. Like saveDocument(_:) this intercepts the
+    /// responder chain ahead of MarkdownDocument.
+    @IBAction func saveDocumentAs(_ sender: Any?) {
+        markdownForSaving { [weak self] markdown in
+            guard let self, let markdown else {
+                NSSound.beep()
+                return
+            }
+            self.presentMarkdownSavePanel(markdown,
+                                          suggestedURL: self.currentFileURL) { result in
+                // Only a completed write clears the draft; a cancelled panel
+                // or a failed write leaves the original URL and the Edited
+                // state exactly as they were.
+                guard case .saved = result else { return }
+                self.editorDraftMarkdown = nil
+                self.editorBaselineMarkdown = self.isEditing ? markdown : nil
+                self.hasUnsavedEditorChanges = false
+            }
+        }
+    }
+
+    /// The live editor buffer when one is up, otherwise the in-memory draft
+    /// or the last rendered source.
+    private func markdownForSaving(_ completion: @escaping (String?) -> Void) {
+        if isEditing, let editor = mainSplit?.editorViewController {
+            editor.fetchMarkdown(completion)
+        } else {
+            completion(editorDraftMarkdown ?? currentMarkdown)
+        }
+    }
+
     private func enterEditMode() {
         guard let split = mainSplit, !split.isEditingDocument,
               let markdown = editorDraftMarkdown ?? currentMarkdown else {
@@ -1513,7 +1549,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                     diskState: DiskFileState,
                                     completion: @escaping (EditedMarkdownSaveResult) -> Void) {
         guard let url = currentFileURL else {
-            completion(.cancelled)
+            // Untitled draft: the panel picks the destination and turns the
+            // user's confirmation into the sandbox write grant.
+            presentMarkdownSavePanel(text, suggestedURL: nil, completion: completion)
             return
         }
         switch diskState {
@@ -1829,6 +1867,54 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
             completion(ok ? .saved : .cancelled)
         }
+    }
+
+    /// The single save-panel path shared by untitled Save and Save As.
+    /// Reports `.cancelled` for both a dismissed panel and a failed write, so
+    /// callers keep the draft and its unsaved-changes state.
+    private func presentMarkdownSavePanel(
+        _ markdown: String,
+        suggestedURL: URL?,
+        completion: @escaping (EditedMarkdownSaveResult) -> Void
+    ) {
+        let panel = NSSavePanel()
+        panel.directoryURL = suggestedURL?.deletingLastPathComponent()
+        let untitledName = NSLocalizedString(
+            "Untitled", comment: "Window title when no document is open")
+        panel.nameFieldStringValue = suggestedURL?.lastPathComponent ?? "\(untitledName).md"
+        panel.allowedContentTypes = [
+            UTType("net.daringfireball.markdown"),
+            UTType(filenameExtension: "md"),
+        ].compactMap { $0 }
+        panel.beginSheetModal(for: documentWindow) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else {
+                completion(.cancelled)
+                return
+            }
+            guard self.write(markdown, to: url) else {
+                completion(.cancelled)
+                return
+            }
+            self.adoptSavedMarkdown(markdown, fileURL: url)
+            completion(.saved)
+        }
+    }
+
+    /// The window now represents `fileURL`. Mirrors the file-backed half of
+    /// display(markdown:fileURL:). Unlike handleRename(to:) this rerenders,
+    /// because a first save moves the asset base from nil to the chosen
+    /// folder — that is what makes relative images resolve.
+    private func adoptSavedMarkdown(_ markdown: String, fileURL: URL) {
+        currentFileURL = fileURL
+        currentMarkdown = markdown
+        markdownDocument?.replaceContents(markdown: markdown, fileURL: fileURL)
+        documentWindow.title = fileURL.lastPathComponent
+        NSDocumentController.shared.noteNewRecentDocumentURL(fileURL)
+        refreshOpenWithItem()
+        refreshOpenInLLMItem()
+        refreshOpenActionsItem()
+        startWatching(fileURL)
+        renderCurrentDocument(text: markdown, fileURL: fileURL)
     }
 
     private func write(_ text: String, to url: URL) -> Bool {
