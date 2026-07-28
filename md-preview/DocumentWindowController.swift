@@ -293,7 +293,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func present(url: URL, intent: NavigationIntent) {
         let fragment = url.fragment?.removingPercentEncoding
         let url = Self.fileURLWithoutFragment(url)
-        let preserveEditMode = isEditing || pendingEditModeURL != nil
+        let preserveEditMode = (isEditing && !isUnchangedUntitledDraft)
+            || pendingEditModeURL != nil
         if isEditing || hasPendingEditorChanges {
             requestEndEditing(keepAccessoryMounted: true) { [weak self] success in
                 guard success else { return }
@@ -884,6 +885,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     var hasPendingEditorChanges: Bool {
         hasUnsavedEditorChanges || isEditorCommitInFlight
+    }
+
+    /// A File → New window the user has not typed into yet: no file, no
+    /// pending edits, no source. Its editor is placeholder chrome, so opening
+    /// a folder or a file into the window should replace it rather than carry
+    /// edit mode along. A draft holding real content is never this.
+    private var isUnchangedUntitledDraft: Bool {
+        currentFileURL == nil
+            && !hasPendingEditorChanges
+            && (editorDraftMarkdown ?? currentMarkdown ?? "").isEmpty
     }
 
     func commitPendingEditsForTermination(completion: @escaping (Bool) -> Void) {
@@ -2902,6 +2913,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func openFolder(_ folderURL: URL) {
+        // The placeholder editor of an untouched untitled window would cover
+        // the navigator and drag edit mode into the next file opened from it.
+        // Retire it first — and only once it has finished exiting, since that
+        // exit rerenders the empty draft and would otherwise unmount the
+        // folder we just showed. A draft with real content is left alone.
+        if isEditing, isUnchangedUntitledDraft {
+            requestEndEditing { [weak self] success in
+                guard success else { return }
+                self?.openFolder(folderURL)
+            }
+            return
+        }
         let folderURL = folderURL.standardizedFileURL
         if currentFileURL == nil {
             documentWindow.title = folderURL.lastPathComponent
