@@ -76,3 +76,4 @@ node_modules/
 
 # Local design tooling
 .superpowers/
+.worktrees/
