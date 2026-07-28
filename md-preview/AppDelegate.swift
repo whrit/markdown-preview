@@ -361,6 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   self.untitledDocumentScheduleGeneration == generation else { return }
             self.isUntitledDocumentScheduled = false
             guard !requiresNoDocuments || NSDocumentController.shared.documents.isEmpty else { return }
+            guard !self.isPromptingForDocument else { return }
             NSApp.activate(ignoringOtherApps: true)
             NSDocumentController.shared.newDocument(nil)
         }
