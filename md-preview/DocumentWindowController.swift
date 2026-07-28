@@ -94,6 +94,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// When sidebar navigation starts from edit mode, the newly loaded file
     /// should return to edit mode instead of dropping the user into preview.
     private var pendingEditModeURL: URL?
+    /// Set once this window has been asked to browse a folder. Such a window
+    /// is navigator chrome, not an untitled draft, so the URL-less display
+    /// that bootstraps it must never turn into an editor.
+    private var hasMountedFolder = false
     /// Drives the native titlebar subtitle while the editor contains changes
     /// that have not yet been written successfully.
     private var hasUnsavedEditorChanges = false {
@@ -282,7 +286,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             startWatching(fileURL)
             offerToBecomeDefaultHandlerIfNeeded()
         } else {
-            enterEditMode()
+            // Folder windows bootstrap through this same URL-less display and
+            // mount their navigator on the very next statement. Deciding one
+            // runloop turn later separates them from a real File → New, so a
+            // folder open never builds a WKWebView editor it would have to
+            // retire before it ever faded in.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.hasMountedFolder else { return }
+                self.enterEditMode()
+            }
         }
     }
 
@@ -2913,11 +2925,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func openFolder(_ folderURL: URL) {
-        // The placeholder editor of an untouched untitled window would cover
-        // the navigator and drag edit mode into the next file opened from it.
-        // Retire it first — and only once it has finished exiting, since that
-        // exit rerenders the empty draft and would otherwise unmount the
-        // folder we just showed. A draft with real content is left alone.
+        hasMountedFolder = true
+        // A window that is already an untouched untitled editor has one to
+        // retire; wait for that exit so the navigator appears in a settled
+        // preview rather than behind a fading editor. A draft with real
+        // content is left alone.
         if isEditing, isUnchangedUntitledDraft {
             requestEndEditing { [weak self] success in
                 guard success else { return }
