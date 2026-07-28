@@ -31,7 +31,7 @@
 - Consumes: existing `MainSplitViewController.display(markdown:fileName:url:assetBaseURL:)` and `EditorViewController.focusEditor()`.
 - Produces: `MarkdownDocument.replaceContents(markdown:fileURL:)` accepting `URL?`; `DocumentWindowController.renderCurrentDocument(text:fileURL:)` accepting `URL?`; edit/preview behavior that works when `currentFileURL == nil`.
 
-- [ ] **Step 1: Record the failing untitled-document behavior**
+- [x] **Step 1: Record the failing untitled-document behavior**
 
 Build the current app into a deterministic location:
 
@@ -45,7 +45,7 @@ xcodebuild -project md-preview.xcodeproj \
 
 Launch `/tmp/markdown-preview-derived/Build/Products/Debug/Markdown Preview.app`, invoke File → New, and record the current failure: the untitled window cannot enter Edit Mode or produce a rendered preview because `currentFileURL` is nil. Do not add UI-test infrastructure for this one AppKit flow.
 
-- [ ] **Step 2: Let the document model retain source before a URL exists**
+- [x] **Step 2: Let the document model retain source before a URL exists**
 
 Change the existing replacement API rather than adding a parallel untitled API:
 
@@ -60,7 +60,7 @@ func replaceContents(markdown: String, fileURL: URL? = nil) {
 
 Before changing the exported signature, run LSP references for `replaceContents(markdown:fileURL:)`; every existing call must continue compiling through the optional default.
 
-- [ ] **Step 3: Render every displayed document, including untitled source**
+- [x] **Step 3: Render every displayed document, including untitled source**
 
 In `DocumentWindowController.display(markdown:fileURL:)`, keep file-only recent-document, watcher, and default-handler work inside `if let fileURL`, but move rendering outside that branch:
 
@@ -87,7 +87,7 @@ private func renderCurrentDocument(text: String, fileURL: URL?) {
 
 Update every callsite found through LSP references. File-backed calls keep passing their URL; draft-only rerenders pass the optional current URL.
 
-- [ ] **Step 4: Remove URL gates from Edit Mode**
+- [x] **Step 4: Remove URL gates from Edit Mode**
 
 Use source presence as the edit invariant:
 
@@ -112,7 +112,7 @@ self.markdownDocument?.replaceContents(markdown: markdown, fileURL: self.current
 
 Change draft discard, external adoption, exit rerender, and `rerenderCurrentPreview()` callsites so they update/render source with an optional URL. Keep disk-state checks conditional through the existing `diskFileState(for:expectedMarkdown:)` behavior; do not invent a fake temporary path.
 
-- [ ] **Step 5: Focus the editor when it becomes visible**
+- [x] **Step 5: Focus the editor when it becomes visible**
 
 At the point `MainSplitViewController.revealEditorIfPrepared(_:)` marks the editor visible, focus the existing editor:
 
@@ -124,7 +124,7 @@ editorVC.focusEditor()
 
 This makes File → New immediately ready for typing or Command-V and also improves the existing file-backed Edit action.
 
-- [ ] **Step 6: Build and smoke-test the source-to-preview loop**
+- [x] **Step 6: Build and smoke-test the source-to-preview loop**
 
 Run:
 
@@ -157,7 +157,7 @@ $$x^2 + y^2 = z^2$$
 
 Invoke Command-E. Confirm the full renderer shows frontmatter, heading outline, task, bold text, highlighted code, and math. Invoke Command-E again and confirm the exact source remains.
 
-- [ ] **Step 7: Commit the independently working untitled preview**
+- [x] **Step 7: Commit the independently working untitled preview**
 
 ```bash
 git add md-preview/MarkdownDocument.swift \
@@ -178,11 +178,11 @@ git commit -m "Add editable untitled Markdown previews"
 - Consumes: Task 1’s optional-URL `replaceContents(markdown:fileURL:)` and `renderCurrentDocument(text:fileURL:)`.
 - Produces: `saveDocumentAs(_:)`, `presentMarkdownSavePanel(_:suggestedURL:completion:)`, and `adoptSavedMarkdown(_:fileURL:)`; Command-S and Save As work for untitled drafts.
 
-- [ ] **Step 1: Verify the failing save contract**
+- [x] **Step 1: Verify the failing save contract**
 
 With an untitled draft open, invoke Command-S. The pre-change flow reaches `saveEditedMarkdown` with no URL and returns `.cancelled`; no save panel appears. Close the dirty window and choose Save; the same failure must leave the window open. This is the behavioral failure the task fixes.
 
-- [ ] **Step 2: Enable Save and Save As for in-memory source**
+- [x] **Step 2: Enable Save and Save As for in-memory source**
 
 Extend menu validation without enabling unrelated document actions:
 
@@ -202,7 +202,7 @@ func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
 
 Keep `saveDocument(_:)` routed through `commitEdits(exitAfter: false)` so close/termination completions still serialize behind an in-flight commit.
 
-- [ ] **Step 3: Add one save-panel implementation**
+- [x] **Step 3: Add one save-panel implementation**
 
 Add a helper that both untitled Save and Save As use:
 
@@ -238,7 +238,7 @@ private func presentMarkdownSavePanel(
 
 Use the existing `UniformTypeIdentifiers` import and write helper. Do not create a temporary file or bypass `NSSavePanel`.
 
-- [ ] **Step 4: Adopt a successful save everywhere once**
+- [x] **Step 4: Adopt a successful save everywhere once**
 
 Add the successful transition:
 
@@ -259,7 +259,7 @@ private func adoptSavedMarkdown(_ markdown: String, fileURL: URL) {
 
 The rerender is required: it changes the nil asset base to the chosen file’s parent directory. Do not call `handleRename(to:)`; that method intentionally skips rerendering and currently requires an existing URL.
 
-- [ ] **Step 5: Route untitled Save through the panel**
+- [x] **Step 5: Route untitled Save through the panel**
 
 Replace the nil-URL cancellation at the start of `saveEditedMarkdown`:
 
@@ -272,7 +272,7 @@ if currentFileURL == nil {
 
 Then unwrap the file-backed URL and preserve every existing `.unchanged`, `.modified`, `.missing`, and `.unreadable` branch unchanged.
 
-- [ ] **Step 6: Implement Save As without a second persistence path**
+- [x] **Step 6: Implement Save As without a second persistence path**
 
 Add a source-fetch helper:
 
@@ -308,7 +308,7 @@ Add the responder action used by the existing XIB menu item:
 
 A cancelled or failed Save As must leave the original URL and dirty state untouched. `adoptSavedMarkdown` runs only after the new file is written.
 
-- [ ] **Step 7: Smoke-test save, cancellation, close, and asset-base adoption**
+- [x] **Step 7: Smoke-test save, cancellation, close, and asset-base adoption**
 
 Build again with the Task 1 command. Then verify all of these manually:
 
@@ -321,7 +321,7 @@ Build again with the Task 1 command. Then verify all of these manually:
 7. On a file-backed document, Save As creates the new file and the current window follows it.
 8. Existing external-edit conflict choices still behave as before.
 
-- [ ] **Step 8: Commit safe untitled saving**
+- [x] **Step 8: Commit safe untitled saving**
 
 ```bash
 git add md-preview/DocumentWindowController.swift
@@ -340,7 +340,7 @@ git commit -m "Save untitled Markdown documents"
 - Consumes: standard `NSDocumentController.shared.newDocument(_:)` and Task 1’s untitled window behavior.
 - Produces: no-file launch and reopen create one untitled document; `newWindowForTab(_:)` creates an untitled tab; incoming URLs suppress scheduled untitled creation.
 
-- [ ] **Step 1: Preserve the launch-race invariant while changing the action**
+- [x] **Step 1: Preserve the launch-race invariant while changing the action**
 
 Keep the existing asynchronous generation guard, but rename it around untitled creation rather than an open panel:
 
@@ -372,7 +372,7 @@ private func cancelScheduledUntitledDocument() {
 
 Remove launch-only open-panel state that no longer has a caller: `isOpeningDocumentFromPrompt`, `documentPromptScheduleGeneration`, `isDocumentPromptScheduled`, and `activeOpenPanel`. Remove the dead assignments around the explicit open completion. Keep `isPromptingForDocument` for explicit Command-O serialization. Keep `applicationShouldOpenUntitledFile` returning `false`; this app creates the document through the guarded custom schedule so AppKit cannot race a second untitled document against incoming URL events.
 
-- [ ] **Step 2: Replace no-file prompt callsites**
+- [x] **Step 2: Replace no-file prompt callsites**
 
 Update these paths to call `scheduleUntitledDocument(requiresNoDocuments: true)`:
 
@@ -383,7 +383,7 @@ Update these paths to call `scheduleUntitledDocument(requiresNoDocuments: true)`
 
 At the start of `application(_:open:)`, call `cancelScheduledUntitledDocument()` before opening URLs. Do not change explicit `openDocument(_:)` or `promptForDocument()`; Command-O still presents the file/folder panel.
 
-- [ ] **Step 3: Make Command-T create an untitled tab**
+- [x] **Step 3: Make Command-T create an untitled tab**
 
 Replace the file prompt in `DocumentWindowController.newWindowForTab(_:)`:
 
@@ -396,7 +396,7 @@ override func newWindowForTab(_ sender: Any?) {
 
 Keep project-navigator **Open in New Tab** routed through `openInNewTab(_:)` so a selected file still opens as a tab.
 
-- [ ] **Step 4: Build and verify launch/new behavior end to end**
+- [x] **Step 4: Build and verify launch/new behavior end to end**
 
 Run:
 
@@ -418,7 +418,7 @@ Verify:
 6. Command-O still opens the existing Markdown file/folder panel.
 7. A failed incoming file open falls back to one untitled editor after presenting the error.
 
-- [ ] **Step 5: Run repository regressions**
+- [x] **Step 5: Run repository regressions**
 
 Run the existing helper suite:
 
@@ -428,7 +428,7 @@ swift test --package-path tests/swift-tests
 
 Then request workspace LSP diagnostics for all changed Swift files. Expected: zero new errors or warnings attributable to the feature.
 
-- [ ] **Step 6: Commit launch and tab behavior**
+- [x] **Step 6: Commit launch and tab behavior**
 
 ```bash
 git add md-preview/AppDelegate.swift md-preview/DocumentWindowController.swift
@@ -439,12 +439,12 @@ git commit -m "Open untitled Markdown drafts by default"
 
 ## Final Acceptance Checklist
 
-- [ ] No-file launch, Command-N, and Command-T produce focused untitled editors.
-- [ ] Pasted source toggles to the complete existing renderer without a file.
-- [ ] Draft source survives repeated Edit/Preview transitions byte-for-byte.
-- [ ] Command-S and Save As produce `.md` source through `NSSavePanel`.
-- [ ] Cancelled/failed saves never clear the draft or dirty state.
-- [ ] Save/Don’t Save/Cancel close behavior prevents data loss.
-- [ ] Saving adopts the URL and immediately enables relative assets and file-backed actions.
-- [ ] Incoming file launches, explicit Open, file watching, conflict handling, export, Quick Look, and file-backed editing remain unchanged.
-- [ ] Debug build and existing Swift helper tests pass.
+- [x] No-file launch, Command-N, and Command-T produce focused untitled editors.
+- [x] Pasted source toggles to the complete existing renderer without a file.
+- [x] Draft source survives repeated Edit/Preview transitions byte-for-byte.
+- [x] Command-S and Save As produce `.md` source through `NSSavePanel`.
+- [x] Cancelled/failed saves never clear the draft or dirty state.
+- [x] Save/Don’t Save/Cancel close behavior prevents data loss.
+- [x] Saving adopts the URL and immediately enables relative assets and file-backed actions.
+- [x] Incoming file launches, explicit Open, file watching, conflict handling, export, Quick Look, and file-backed editing remain unchanged.
+- [x] Debug build and existing Swift helper tests pass.

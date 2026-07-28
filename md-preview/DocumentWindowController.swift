@@ -51,8 +51,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private enum EditedMarkdownSaveResult {
-        case saved
+        /// `rerendered` marks a save that already refreshed the preview — the
+        /// save panel adopts a new file URL, so it must rebuild the asset base
+        /// itself and completion handling must not render the same text twice.
+        case saved(rerendered: Bool)
         case reloaded(String)
+        /// The write itself failed; the draft stays dirty and the user is told.
+        case failed(Error)
         case cancelled
     }
 
@@ -121,6 +126,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private static let findDebounceDelay: TimeInterval = 0.10
     private let tableUndoManager = UndoManager()
     private var isTableUndoSaveInFlight = false
+    /// Guards the whole Save As fetch→panel round trip and every other
+    /// save-panel presentation, so a repeated ⇧⌘S cannot stack two panels.
+    private var isSavePanelRequestActive = false
 
     private var documentWindow: NSWindow {
         guard let window else {
@@ -259,7 +267,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
-        isEditing ? nil : tableUndoManager
+        tableUndoManager
     }
 
     func display(markdown: String, fileURL: URL?) {
@@ -734,9 +742,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(saveDocument(_:)):
-            return isEditing || hasPendingEditorChanges
+            return (isEditing || hasPendingEditorChanges) && !isSavePanelRequestActive
         case #selector(saveDocumentAs(_:)):
-            return currentMarkdown != nil && !isEditorCommitInFlight
+            return currentMarkdown != nil && !isFolderOnlyWindow
+                && !isEditorCommitInFlight && !isSavePanelRequestActive
         default:
             syncSidebarMenuState()
             return true
@@ -889,7 +898,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     var canToggleEditMode: Bool {
-        isEditing || currentMarkdown != nil
+        isEditing || (currentMarkdown != nil && !isFolderOnlyWindow)
+    }
+
+    /// A mounted folder with nothing selected is navigator chrome: there is no
+    /// document source to edit. Selecting a file inside it clears this, so
+    /// files browsed from a folder stay editable.
+    private var isFolderOnlyWindow: Bool {
+        hasMountedFolder && currentFileURL == nil
     }
 
     var canFormatMarkdown: Bool { isEditing }
@@ -1142,7 +1158,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// Intercepts the responder chain ahead of MarkdownDocument, whose
     /// NSDocument save machinery stays disabled.
     @IBAction func saveDocument(_ sender: Any?) {
-        guard isEditing || hasPendingEditorChanges else {
+        guard !isSavePanelRequestActive, isEditing || hasPendingEditorChanges else {
             NSSound.beep()
             return
         }
@@ -1153,15 +1169,28 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// follows the new file. Like saveDocument(_:) this intercepts the
     /// responder chain ahead of MarkdownDocument.
     @IBAction func saveDocumentAs(_ sender: Any?) {
+        // The claim spans the asynchronous editor fetch as well as the panel:
+        // without it a second ⇧⌘S during the fetch opens a second panel.
+        guard beginSavePanelRequest() else {
+            NSSound.beep()
+            return
+        }
         markdownForSaving { [weak self] markdown in
-            guard let self, let markdown else {
+            guard let self else { return }
+            guard let markdown else {
+                self.endSavePanelRequest()
                 NSSound.beep()
                 return
             }
             let revision = self.editorChangeRevision
             self.presentMarkdownSavePanel(markdown,
                                           suggestedURL: self.currentFileURL,
-                                          savedAtRevision: revision) { _ in }
+                                          savedAtRevision: revision) { [weak self] result in
+                // Save As has no commit pipeline behind it, so the failure
+                // alert is this closure's job. Cancellation stays silent.
+                guard case let .failed(error) = result else { return }
+                self?.presentWriteFailureAlert(error)
+            }
         }
     }
 
@@ -1176,11 +1205,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func enterEditMode() {
-        guard let split = mainSplit, !split.isEditingDocument,
+        guard !isFolderOnlyWindow, let split = mainSplit, !split.isEditingDocument,
               let markdown = editorDraftMarkdown ?? currentMarkdown else {
             NSSound.beep()
             return
         }
+        // CodeMirror owns undo while editing. Discard preview-table history so
+        // the window's native undo manager cannot consume the first Command-Z.
+        tableUndoManager.removeAllActions()
 
         // Edit the complete source. Frontmatter is stripped only by the
         // read-only renderer; the editor must expose and preserve it.
@@ -1432,7 +1464,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                                                 revision: Int?,
                                                 exitAfter: Bool) {
         switch result {
-        case .saved:
+        case let .saved(rerendered):
             currentMarkdown = body
             if let url = currentFileURL {
                 markdownDocument?.replaceContents(markdown: body, fileURL: url)
@@ -1442,11 +1474,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             if revision == nil || revision == editorChangeRevision {
                 hasUnsavedEditorChanges = false
             }
-            completeSuccessfulEditorCommit(exitAfter: exitAfter, rerender: true)
+            completeSuccessfulEditorCommit(exitAfter: exitAfter, rerender: !rerendered)
         case let .reloaded(externalMarkdown):
             adoptExternalMarkdown(externalMarkdown,
                                   editor: editor,
                                   exitAfter: exitAfter)
+        case let .failed(error):
+            presentWriteFailureAlert(error)
+            finishEditorCommit(success: false)
         case .cancelled:
             finishEditorCommit(success: false)
         }
@@ -1550,6 +1585,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard let url = currentFileURL else {
             // Untitled draft: the panel picks the destination and turns the
             // user's confirmation into the sandbox write grant.
+            guard beginSavePanelRequest() else {
+                completion(.cancelled)
+                return
+            }
             presentMarkdownSavePanel(text,
                                      suggestedURL: nil,
                                      savedAtRevision: revision,
@@ -1602,6 +1641,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
+        guard currentFileURL != nil else {
+            applyDraftMutation(updated, previousMarkdown: baseline)
+            return
+        }
+
         let diskState = diskFileState(for: currentFileURL, expectedMarkdown: baseline)
         saveEditedMarkdown(updated, diskState: diskState) { [weak self] result in
             guard let self else { return }
@@ -1618,6 +1662,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     self.markdownDocument?.replaceContents(markdown: externalMarkdown, fileURL: url)
                     self.renderCurrentDocument(text: externalMarkdown, fileURL: url)
                 }
+            case let .failed(error):
+                self.presentWriteFailureAlert(error)
+                self.rerenderCurrentPreview()
             case .cancelled:
                 self.rerenderCurrentPreview()
             }
@@ -1646,8 +1693,17 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             return
         }
 
-        let diskState = diskFileState(for: currentFileURL, expectedMarkdown: baseline)
         let actionName = tableUndoActionName(for: request.edits)
+        guard currentFileURL != nil else {
+            applyDraftMutation(updated, previousMarkdown: baseline)
+            registerTableUndo(restoring: baseline,
+                              expectedCurrentMarkdown: updated,
+                              fileURL: nil,
+                              actionName: actionName)
+            return
+        }
+
+        let diskState = diskFileState(for: currentFileURL, expectedMarkdown: baseline)
         saveEditedMarkdown(updated, diskState: diskState) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -1670,6 +1726,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     self.markdownDocument?.replaceContents(markdown: externalMarkdown, fileURL: url)
                     self.renderCurrentDocument(text: externalMarkdown, fileURL: url)
                 }
+            case let .failed(error):
+                self.presentWriteFailureAlert(error)
+                self.rerenderCurrentPreview()
             case .cancelled:
                 self.rerenderCurrentPreview()
             }
@@ -1696,7 +1755,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func registerTableUndo(restoring markdown: String,
                                    expectedCurrentMarkdown: String,
-                                   fileURL: URL,
+                                   fileURL: URL?,
                                    actionName: String) {
         tableUndoManager.registerUndo(withTarget: self) { target in
             target.restoreTableMarkdown(
@@ -1711,11 +1770,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func restoreTableMarkdown(_ markdown: String,
                                       expectedCurrentMarkdown: String,
-                                      fileURL: URL,
+                                      fileURL: URL?,
                                       actionName: String) {
         guard !isEditing,
               !isTableUndoSaveInFlight,
-              currentFileURL?.standardizedFileURL == fileURL.standardizedFileURL,
+              currentFileURL?.standardizedFileURL == fileURL?.standardizedFileURL,
               currentMarkdown == expectedCurrentMarkdown else {
             tableUndoManager.removeAllActions()
             return
@@ -1730,6 +1789,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             fileURL: fileURL,
             actionName: actionName
         )
+        guard let fileURL else {
+            // Untitled draft — undo and redo stay in memory, same as the
+            // mutation that registered them.
+            applyDraftMutation(markdown, previousMarkdown: expectedCurrentMarkdown)
+            return
+        }
         isTableUndoSaveInFlight = true
         let diskState = diskFileState(for: currentFileURL,
                                       expectedMarkdown: expectedCurrentMarkdown)
@@ -1749,6 +1814,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                     fileURL: fileURL
                 )
                 self.renderCurrentDocument(text: externalMarkdown, fileURL: fileURL)
+            case let .failed(error):
+                self.tableUndoManager.removeAllActions()
+                self.presentWriteFailureAlert(error)
+                self.rerenderCurrentPreview()
             case .cancelled:
                 self.tableUndoManager.removeAllActions()
                 self.rerenderCurrentPreview()
@@ -1759,6 +1828,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func rerenderCurrentPreview() {
         guard let markdown = currentMarkdown else { return }
         renderCurrentDocument(text: markdown, fileURL: currentFileURL)
+    }
+
+    /// A draft with no destination yet: preview mutations land in memory and
+    /// stay dirty instead of interrupting the interaction with a save panel.
+    /// The retained draft is what Save and the close prompt later write out.
+    private func applyDraftMutation(_ updated: String, previousMarkdown: String) {
+        if editorBaselineMarkdown == nil {
+            editorBaselineMarkdown = previousMarkdown
+        }
+        editorDraftMarkdown = updated
+        currentMarkdown = updated
+        editorChangeRevision += 1
+        hasUnsavedEditorChanges = true
+        markdownDocument?.replaceContents(markdown: updated)
+        renderCurrentDocument(text: updated, fileURL: nil)
     }
 
     private func presentExternalEditConflict(
@@ -1842,14 +1926,26 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         to url: URL,
         completion: @escaping (EditedMarkdownSaveResult) -> Void
     ) {
-        if write(text, to: url) {
-            completion(.saved)
+        do {
+            try write(text, to: url)
+            completion(.saved(rerendered: false))
             return
+        } catch {
+            // Only a sandbox denial is worth re-asking for with a panel;
+            // anything else is a real failure the user needs to see.
+            guard Self.isPermissionError(error) else {
+                completion(.failed(error))
+                return
+            }
         }
         // Sandbox denied the write — the file came in through the read-only
         // filesystem exception (folder navigator) rather than a user-selected
         // grant. A save panel pointed at the same file converts the user's
         // confirmation into a read-write grant.
+        guard beginSavePanelRequest() else {
+            completion(.cancelled)
+            return
+        }
         let panel = NSSavePanel()
         panel.directoryURL = url.deletingLastPathComponent()
         panel.nameFieldStringValue = url.lastPathComponent
@@ -1858,22 +1954,34 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             comment: "Save panel permission message"
         )
         panel.beginSheetModal(for: documentWindow) { [weak self] response in
-            guard let self, response == .OK, let chosen = panel.url else {
+            guard let self else {
                 completion(.cancelled)
                 return
             }
-            let ok = self.write(text, to: chosen)
-            if ok, chosen.standardizedFileURL != url.standardizedFileURL {
+            self.endSavePanelRequest()
+            guard response == .OK, let chosen = panel.url else {
+                completion(.cancelled)
+                return
+            }
+            do {
+                try self.write(text, to: chosen)
+            } catch {
+                completion(.failed(error))
+                return
+            }
+            if chosen.standardizedFileURL != url.standardizedFileURL {
                 // Saved under a different name — follow the new file.
                 self.handleRename(to: chosen)
             }
-            completion(ok ? .saved : .cancelled)
+            completion(.saved(rerendered: false))
         }
     }
 
-    /// The single save-panel path shared by untitled Save and Save As.
-    /// Reports `.cancelled` for both a dismissed panel and a failed write, so
-    /// callers keep the draft and its unsaved-changes state.
+    /// The single save-panel path shared by untitled Save and Save As. The
+    /// caller must already hold the save-panel claim; this releases it on
+    /// every response. Reports `.cancelled` for a dismissed panel and
+    /// `.failed` for a write that could not complete, so callers keep the
+    /// draft and its unsaved-changes state either way.
     private func presentMarkdownSavePanel(
         _ markdown: String,
         suggestedURL: URL?,
@@ -1890,16 +1998,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             UTType(filenameExtension: "md"),
         ].compactMap { $0 }
         panel.beginSheetModal(for: documentWindow) { [weak self] response in
-            guard let self, response == .OK, let url = panel.url else {
+            guard let self else {
                 completion(.cancelled)
                 return
             }
-            guard self.write(markdown, to: url) else {
+            self.endSavePanelRequest()
+            guard response == .OK, let url = panel.url else {
                 completion(.cancelled)
+                return
+            }
+            do {
+                try self.write(markdown, to: url)
+            } catch {
+                completion(.failed(error))
                 return
             }
             self.adoptSavedMarkdown(markdown, fileURL: url, savedAtRevision: revision)
-            completion(.saved)
+            completion(.saved(rerendered: true))
         }
     }
 
@@ -1932,20 +2047,60 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
     }
 
-    private func write(_ text: String, to url: URL) -> Bool {
+    private func write(_ text: String, to url: URL) throws {
         // Atomic first (safe against partial writes); a file-scoped sandbox
-        // grant can deny the temp-file rename, so fall back to in-place.
+        // grant can deny the temp-file rename, so fall back to in-place. The
+        // in-place attempt is the decisive one, so its error is the one that
+        // describes why the document could not be written.
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
-            return true
         } catch {
-            do {
-                try text.write(to: url, atomically: false, encoding: .utf8)
+            try text.write(to: url, atomically: false, encoding: .utf8)
+        }
+    }
+
+    /// Sandbox denials surface as a Cocoa no-permission error, sometimes only
+    /// on the wrapped POSIX error. Those are the ones a save panel can turn
+    /// into a write grant; every other failure is final.
+    private static func isPermissionError(_ error: Error) -> Bool {
+        var next: NSError? = error as NSError
+        while let current = next {
+            switch (current.domain, current.code) {
+            case (NSCocoaErrorDomain, NSFileWriteNoPermissionError),
+                 (NSCocoaErrorDomain, NSFileWriteVolumeReadOnlyError),
+                 (NSPOSIXErrorDomain, Int(EACCES)),
+                 (NSPOSIXErrorDomain, Int(EPERM)):
                 return true
-            } catch {
-                return false
+            default:
+                next = current.userInfo[NSUnderlyingErrorKey] as? NSError
             }
         }
+        return false
+    }
+
+    /// Final write failure: the text is still in memory and still dirty, so
+    /// say what went wrong rather than dropping the save silently.
+    private func presentWriteFailureAlert(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString(
+            "The document could not be saved",
+            comment: "Write failure alert title"
+        )
+        alert.informativeText = error.localizedDescription
+        alert.beginSheetModal(for: documentWindow) { _ in }
+    }
+
+    /// Claims the one save panel this window may show at a time. Whoever takes
+    /// the claim must release it on every response and failure path.
+    private func beginSavePanelRequest() -> Bool {
+        guard !isSavePanelRequestActive else { return false }
+        isSavePanelRequestActive = true
+        return true
+    }
+
+    private func endSavePanelRequest() {
+        isSavePanelRequestActive = false
     }
 
     // MARK: - Open
@@ -3025,18 +3180,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     func openFolder(_ folderURL: URL) {
-        hasMountedFolder = true
-        // A window that is already an untouched untitled editor has one to
-        // retire; wait for that exit so the navigator appears in a settled
-        // preview rather than behind a fading editor. A draft with real
-        // content is left alone.
-        if isEditing, isUnchangedUntitledDraft {
+        if isEditing || hasPendingEditorChanges {
             requestEndEditing { [weak self] success in
                 guard success else { return }
                 self?.openFolder(folderURL)
             }
             return
         }
+        hasMountedFolder = true
         let folderURL = folderURL.standardizedFileURL
         if currentFileURL == nil {
             documentWindow.title = folderURL.lastPathComponent
@@ -3108,10 +3259,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     @IBAction func openDocument(_ sender: Any?) {
-        promptForDocument(openAsTab: false)
+        promptForDocument()
     }
 
-    private func promptForDocument(openAsTab: Bool) {
+    private func promptForDocument() {
         let panel = makeOpenPanel()
         panel.beginSheetModal(for: documentWindow) { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
@@ -3119,13 +3270,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 self.openFolder(url)
                 return
             }
-            if openAsTab {
-                self.openInNewTab(url)
-            } else {
-                // Plain open: tab placement follows the system
-                // "Prefer tabs" setting via attachToExistingTabGroupIfNeeded.
-                self.openDocumentWindow(for: url)
-            }
+            // Tab placement follows the system "Prefer tabs" setting via
+            // attachToExistingTabGroupIfNeeded.
+            self.openDocumentWindow(for: url)
         }
     }
 
