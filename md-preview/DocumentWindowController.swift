@@ -3019,10 +3019,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     /// Backs the "+" button in the native tab bar and File > New Tab.
-    /// There is no untitled-document concept here, so prompt for a file
-    /// and open it as a tab — an explicit tab request, unlike ⌘O.
     override func newWindowForTab(_ sender: Any?) {
-        promptForDocument(openAsTab: true)
+        Self.markNextWindowAsTab()
+        NSDocumentController.shared.newDocument(sender)
     }
 
     func openFolder(_ folderURL: URL) {
