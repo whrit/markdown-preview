@@ -294,6 +294,7 @@ final class MainSplitViewController: NSSplitViewController {
                         guard let self, self.isEditorPreparing else { return }
                         self.isEditorPreparing = false
                         self.isEditorVisible = true
+                        editorVC.focusEditor()
                     }
                 }
             }

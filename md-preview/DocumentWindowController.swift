@@ -276,11 +276,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         refreshOpenInLLMItem()
         refreshOpenActionsItem()
         updateEditToolbarItem()
+        renderCurrentDocument(text: markdown, fileURL: fileURL)
         if let fileURL {
             NSDocumentController.shared.noteNewRecentDocumentURL(fileURL)
-            renderCurrentDocument(text: markdown, fileURL: fileURL)
             startWatching(fileURL)
             offerToBecomeDefaultHandlerIfNeeded()
+        } else {
+            enterEditMode()
         }
     }
 
@@ -870,7 +872,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     var canToggleEditMode: Bool {
-        isEditing || (currentFileURL != nil && currentMarkdown != nil)
+        isEditing || currentMarkdown != nil
     }
 
     var canFormatMarkdown: Bool { isEditing }
@@ -936,7 +938,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             ? NSLocalizedString("Stop editing and return to preview", comment: "Edit toolbar item tooltip while editing")
             : NSLocalizedString("Edit document", comment: "Edit toolbar item tooltip")
         editButton?.toolTip = editItem?.toolTip
-        editButton?.isEnabled = editing || (currentFileURL != nil && currentMarkdown != nil)
+        editButton?.isEnabled = canToggleEditMode
     }
 
     @objc private func toggleEditAction(_ sender: Any?) {
@@ -1122,7 +1124,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func enterEditMode() {
         guard let split = mainSplit, !split.isEditingDocument,
-              currentFileURL != nil,
               let markdown = editorDraftMarkdown ?? currentMarkdown else {
             NSSound.beep()
             return
@@ -1153,7 +1154,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func previewPendingEdits() {
         guard let split = mainSplit, let editor = split.editorViewController else { return }
         editor.fetchMarkdown { [weak self] markdown in
-            guard let self, let markdown, let url = self.currentFileURL else {
+            guard let self, let markdown else {
                 NSSound.beep()
                 return
             }
@@ -1164,7 +1165,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 self.editorDraftMarkdown = nil
                 self.editorBaselineMarkdown = nil
             }
-            self.markdownDocument?.replaceContents(markdown: markdown, fileURL: url)
+            self.markdownDocument?.replaceContents(markdown: markdown, fileURL: self.currentFileURL)
             // exitEditMode(rerender: true) renders the pending markdown once
             // the editor's scroll anchor has been captured; rendering here as
             // well raced the anchor hand-off and re-laid the preview out
@@ -1257,9 +1258,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         var shouldRerender = false
         if let baseline = editorBaselineMarkdown {
             currentMarkdown = baseline
-            if let url = currentFileURL {
-                markdownDocument?.replaceContents(markdown: baseline, fileURL: url)
-            }
+            markdownDocument?.replaceContents(markdown: baseline, fileURL: currentFileURL)
             shouldRerender = true
         }
         if case let .modified(externalMarkdown) = diskFileState(
@@ -1267,9 +1266,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             expectedMarkdown: editorBaselineMarkdown ?? currentMarkdown
         ) {
             currentMarkdown = externalMarkdown
-            if let url = currentFileURL {
-                markdownDocument?.replaceContents(markdown: externalMarkdown, fileURL: url)
-            }
+            markdownDocument?.replaceContents(markdown: externalMarkdown, fileURL: currentFileURL)
             shouldRerender = true
         }
         editorDraftMarkdown = nil
@@ -1406,13 +1403,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         editorBaselineMarkdown = isEditing && !exitAfter ? markdown : nil
         editorChangeRevision = 0
         hasUnsavedEditorChanges = false
-        if let url = currentFileURL {
-            markdownDocument?.replaceContents(markdown: markdown, fileURL: url)
-            if !exitAfter {
-                renderCurrentDocument(text: markdown, fileURL: url)
-            }
-        }
+        markdownDocument?.replaceContents(markdown: markdown, fileURL: currentFileURL)
         if !exitAfter {
+            renderCurrentDocument(text: markdown, fileURL: currentFileURL)
             editor?.load(markdown: markdown)
         }
         completeSuccessfulEditorCommit(exitAfter: exitAfter, rerender: true)
@@ -1476,8 +1469,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             if self.editAccessory == nil {
                 self.updateEditToolbarItem()
             }
-            if rerender, let url = self.currentFileURL, let markdown = self.currentMarkdown {
-                self.renderCurrentDocument(text: markdown, fileURL: url)
+            if rerender, let markdown = self.currentMarkdown {
+                self.renderCurrentDocument(text: markdown, fileURL: self.currentFileURL)
             }
             completion()
         }
@@ -1701,8 +1694,8 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     private func rerenderCurrentPreview() {
-        guard let url = currentFileURL, let markdown = currentMarkdown else { return }
-        renderCurrentDocument(text: markdown, fileURL: url)
+        guard let markdown = currentMarkdown else { return }
+        renderCurrentDocument(text: markdown, fileURL: currentFileURL)
     }
 
     private func presentExternalEditConflict(
@@ -3054,12 +3047,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         NSAlert(error: error).beginSheetModal(for: documentWindow)
     }
 
-    private func renderCurrentDocument(text: String, fileURL: URL) {
+    private func renderCurrentDocument(text: String, fileURL: URL?) {
+        let fileName = fileURL?.lastPathComponent
+            ?? NSLocalizedString("Untitled", comment: "Window title when no document is open")
         (documentWindow.contentViewController as? MainSplitViewController)?
             .display(markdown: text,
-                     fileName: fileURL.lastPathComponent,
+                     fileName: fileName,
                      url: fileURL,
-                     assetBaseURL: fileURL.deletingLastPathComponent())
+                     assetBaseURL: fileURL?.deletingLastPathComponent())
     }
 
     private func addBottomTitlebarAccessory(
