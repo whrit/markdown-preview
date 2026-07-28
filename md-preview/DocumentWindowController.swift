@@ -1158,16 +1158,10 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 NSSound.beep()
                 return
             }
+            let revision = self.editorChangeRevision
             self.presentMarkdownSavePanel(markdown,
-                                          suggestedURL: self.currentFileURL) { result in
-                // Only a completed write clears the draft; a cancelled panel
-                // or a failed write leaves the original URL and the Edited
-                // state exactly as they were.
-                guard case .saved = result else { return }
-                self.editorDraftMarkdown = nil
-                self.editorBaselineMarkdown = self.isEditing ? markdown : nil
-                self.hasUnsavedEditorChanges = false
-            }
+                                          suggestedURL: self.currentFileURL,
+                                          savedAtRevision: revision) { _ in }
         }
     }
 
@@ -1409,7 +1403,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 // Handled above.
                 break
             case .missing, .unreadable:
-                saveEditedMarkdown(body, diskState: diskState) { result in
+                saveEditedMarkdown(body,
+                                   diskState: diskState,
+                                   savedAtRevision: revision) { result in
                     self.handleEditedMarkdownSaveResult(result,
                                                         body: body,
                                                         editor: editor,
@@ -1419,7 +1415,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
             }
             return
         }
-        saveEditedMarkdown(body, diskState: diskState) { result in
+        saveEditedMarkdown(body,
+                           diskState: diskState,
+                           savedAtRevision: revision) { result in
             self.handleEditedMarkdownSaveResult(result,
                                                 body: body,
                                                 editor: editor,
@@ -1547,11 +1545,15 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func saveEditedMarkdown(_ text: String,
                                     diskState: DiskFileState,
+                                    savedAtRevision revision: Int? = nil,
                                     completion: @escaping (EditedMarkdownSaveResult) -> Void) {
         guard let url = currentFileURL else {
             // Untitled draft: the panel picks the destination and turns the
             // user's confirmation into the sandbox write grant.
-            presentMarkdownSavePanel(text, suggestedURL: nil, completion: completion)
+            presentMarkdownSavePanel(text,
+                                     suggestedURL: nil,
+                                     savedAtRevision: revision,
+                                     completion: completion)
             return
         }
         switch diskState {
@@ -1875,6 +1877,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func presentMarkdownSavePanel(
         _ markdown: String,
         suggestedURL: URL?,
+        savedAtRevision revision: Int? = nil,
         completion: @escaping (EditedMarkdownSaveResult) -> Void
     ) {
         let panel = NSSavePanel()
@@ -1895,7 +1898,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
                 completion(.cancelled)
                 return
             }
-            self.adoptSavedMarkdown(markdown, fileURL: url)
+            self.adoptSavedMarkdown(markdown, fileURL: url, savedAtRevision: revision)
             completion(.saved)
         }
     }
@@ -1904,7 +1907,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// display(markdown:fileURL:). Unlike handleRename(to:) this rerenders,
     /// because a first save moves the asset base from nil to the chosen
     /// folder — that is what makes relative images resolve.
-    private func adoptSavedMarkdown(_ markdown: String, fileURL: URL) {
+    private func adoptSavedMarkdown(_ markdown: String,
+                                    fileURL: URL,
+                                    savedAtRevision revision: Int? = nil) {
         currentFileURL = fileURL
         currentMarkdown = markdown
         markdownDocument?.replaceContents(markdown: markdown, fileURL: fileURL)
@@ -1915,6 +1920,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         refreshOpenActionsItem()
         startWatching(fileURL)
         renderCurrentDocument(text: markdown, fileURL: fileURL)
+        editorDraftMarkdown = nil
+        if isEditing {
+            editorBaselineMarkdown = markdown
+            if revision == nil || revision == editorChangeRevision {
+                hasUnsavedEditorChanges = false
+            }
+        } else {
+            editorBaselineMarkdown = nil
+            hasUnsavedEditorChanges = false
+        }
     }
 
     private func write(_ text: String, to url: URL) -> Bool {
